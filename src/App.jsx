@@ -17,6 +17,28 @@ export default function App() {
     matricula: 'SGT-7721',
     nombre: 'Sgto. Juan Pérez (Cisterna Pesada)',
   });
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  useEffect(() => {
+    const handleBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      console.log('[PWA] beforeinstallprompt capturado con éxito');
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+  }, []);
+
+  const handleInstallApp = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+      console.log('[PWA] Decisión del usuario:', choice);
+      setDeferredPrompt(null);
+    } else {
+      alert("🚒 Instalación de Terminal de Cabina PWA:\n\n1. En PC: Abre el menú de Chrome (los 3 puntos verticales arriba a la derecha) ➔ 'Guardar y compartir' ➔ 'Instalar página como aplicación' o 'Instalar Bomberos SCZ'.\n\n2. En Celular: En el menú de Chrome (3 puntos) ➔ 'Instalar aplicación' o 'Agregar a la pantalla principal'.");
+    }
+  };
 
   // Cargar evidencias de IndexedDB
   const refreshEvidences = useCallback(async () => {
@@ -83,6 +105,7 @@ export default function App() {
         camionId={perfilCabina.camionId}
         matricula={perfilCabina.matricula}
         onCambiarPerfil={(nuevo) => setPerfilCabina(nuevo)}
+        onInstallApp={handleInstallApp}
       />
 
       {/* Barra de Pestañas Tácticas */}

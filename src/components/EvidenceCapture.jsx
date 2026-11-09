@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { v7 as uuidv7 } from 'uuid';
 import { saveEvidenceToOutbox } from '../services/indexedDbOutbox';
 import { syncManager } from '../services/syncManager';
+import { aiInferenceEngine } from '../services/aiInferenceEngine';
 
 // Formateador semántico legible para categorías tácticas
 export function formatCategoria(cat) {
@@ -195,8 +196,13 @@ export default function EvidenceCapture({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState(null);
   const [lastSubmission, setLastSubmission] = useState(null);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [microfonoError, setMicrofonoError] = useState(null);
 
   const workerRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   // Suscribirse a syncManager para actualizar reactivamente el estado de la evidencia cuando se sincroniza automáticamente
   useEffect(() => {
@@ -296,18 +302,186 @@ export default function EvidenceCapture({
     }
   };
 
-  // Simulación de dictado por voz táctico (Walkie-talkie)
-  const handleVoiceToggle = () => {
-    if (!isRecording) {
-      setIsRecording(true);
-      setTimeout(() => {
-        setTextoReporte(
-          'Comando central: Fuego estructural controlado en primer piso. Realizando enfriamiento y remoción de brasas en flanco izquierdo.'
-        );
-        setIsRecording(false);
-      }, 1800);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const isRecordingRef = useRef(false);
+
+  // Timer para duración de la grabación
+  useEffect(() => {
+    let interval = null;
+    if (isRecording) {
+      interval = setInterval(() => {
+        setRecordingSeconds(s => s + 1);
+      }, 1000);
     } else {
+      setRecordingSeconds(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isRecording]);
+
+  // Captura y dictado real por voz desde el micrófono (aislado y ultra-resistente)
+  const handleVoiceToggle = async () => {
+    // Si ya está grabando, el usuario quiere detener
+    if (isRecordingRef.current) {
+      isRecordingRef.current = false;
       setIsRecording(false);
+
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try { mediaRecorderRef.current.stop(); } catch (e) {}
+      }
+      if (textoReporte.trim()) {
+        handleProcessWithAi();
+      }
+      return;
+    }
+
+    setMicrofonoError(null);
+
+    // 1. Solicitar permiso explícito al navegador/Android primero
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const streamTest = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Liberar el track inmediatamente para no bloquear el hardware
+        streamTest.getTracks().forEach(t => t.stop());
+      }
+    } catch (permErr) {
+      console.warn('Permiso de micrófono denegado:', permErr);
+      setMicrofonoError('Permiso de micrófono denegado. Permite el acceso en los ajustes del navegador.');
+      return;
+    }
+
+    isRecordingRef.current = true;
+    setIsRecording(true);
+
+    const SpeechRecognition = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognitionRef.current = recognition;
+        recognition.lang = 'es-419'; // Español latinoamericano (universal en Android y navegadores)
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        let baseText = textoReporte ? textoReporte.trim() + ' ' : '';
+
+        recognition.onstart = () => {
+          setIsRecording(true);
+          setMicrofonoError(null);
+        };
+
+        recognition.onresult = (event) => {
+          let interimTranscript = '';
+          let finalTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript + ' ';
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+
+          if (finalTranscript) {
+            baseText += finalTranscript;
+          }
+
+          const fullText = (baseText + interimTranscript).trim();
+          if (fullText) {
+            setTextoReporte(fullText);
+
+            // Inferencia Edge AI reactiva mientras habla
+            if (workerRef.current && fullText.length > 8) {
+              workerRef.current.postMessage({
+                type: 'CLASSIFY_REPORT',
+                payload: { ticketId: `VOICE-${Date.now()}`, textoReporte: fullText },
+              });
+            }
+          }
+        };
+
+        recognition.onerror = (event) => {
+          console.warn('SpeechRecognition error:', event.error);
+          if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+            setMicrofonoError('Permiso de micrófono denegado. Permite el micrófono en los ajustes del navegador.');
+            isRecordingRef.current = false;
+            setIsRecording(false);
+          } else if (event.error === 'network' || event.error === 'audio-capture') {
+            // Si el servicio en la nube de Google falla o la conexión es inestable, conmutar a MediaRecorder sin cerrar
+            console.warn('Conmutando a grabación directa por MediaRecorder...');
+            try { recognition.stop(); } catch (e) {}
+            iniciarMediaRecorderFallback();
+          }
+          // Otros errores como 'no-speech' se ignoran para no cortar la grabación
+        };
+
+        recognition.onend = () => {
+          // Si el usuario no pulsó detener, reiniciar suavemente tras breve pausa para no colisionar
+          if (isRecordingRef.current) {
+            setTimeout(() => {
+              if (isRecordingRef.current && recognitionRef.current) {
+                try {
+                  recognitionRef.current.start();
+                } catch (e) {
+                  // Si el navegador rechaza reabrir SpeechRecognition, continuar con MediaRecorder
+                  if (isRecordingRef.current && (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive')) {
+                    iniciarMediaRecorderFallback();
+                  }
+                }
+              }
+            }, 300);
+          } else {
+            setIsRecording(false);
+          }
+        };
+
+        recognition.start();
+      } catch (err) {
+        console.warn('Error iniciando SpeechRecognition, usando MediaRecorder:', err);
+        iniciarMediaRecorderFallback();
+      }
+    } else {
+      iniciarMediaRecorderFallback();
+    }
+  };
+
+  const iniciarMediaRecorderFallback = async () => {
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) audioChunksRef.current.push(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const url = URL.createObjectURL(audioBlob);
+          setAudioUrl(url);
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.start(250);
+        setIsRecording(true);
+        isRecordingRef.current = true;
+      } else {
+        setMicrofonoError('Tu navegador no soporta captura de audio por micrófono.');
+        setIsRecording(false);
+        isRecordingRef.current = false;
+      }
+    } catch (e) {
+      setMicrofonoError('Permiso de micrófono no disponible en este dispositivo.');
+      setIsRecording(false);
+      isRecordingRef.current = false;
     }
   };
 
@@ -479,17 +653,31 @@ export default function EvidenceCapture({
               type="button"
               className={`btn-tactical btn-record ${isRecording ? 'btn-recording-pulse' : ''}`}
               onClick={handleVoiceToggle}
+              title="Graba tu voz usando el micrófono de tu celular o PC y transcribe en tiempo real"
             >
-              {isRecording ? '🔴 GRABANDO AUDIO EN VIVO...' : '🎙️ SIMULAR DICTADO VOZ TÁCTICO'}
+              {isRecording ? `🔴 GRABANDO TU VOZ (${recordingSeconds}s)... (TOCA PARA DETENER)` : '🎙️ GRABAR DICTADO POR VOZ (MICRÓFONO)'}
             </button>
           </div>
+
+          {microfonoError && (
+            <div style={{ color: '#F87171', fontSize: '11px', marginTop: '4px', marginBottom: '4px' }}>
+              ⚠️ {microfonoError}
+            </div>
+          )}
+
+          {audioUrl && (
+            <div style={{ margin: '8px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Audio grabado:</span>
+              <audio controls src={audioUrl} style={{ height: '28px', maxWidth: '280px' }} />
+            </div>
+          )}
 
           <textarea
             className="tactical-textarea"
             rows="3"
             value={textoReporte}
             onChange={(e) => setTextoReporte(e.target.value)}
-            placeholder="Describa la situación del siniestro o presione el botón de dictado táctico..."
+            placeholder="Habla por el micrófono con el botón superior o escribe el reporte táctico aquí..."
           />
 
           {/* Plantillas Rápidas */}
@@ -546,6 +734,29 @@ export default function EvidenceCapture({
                 <span className="metric-box-label">ALERTA Y RECOMENDACIÓN OPERATIVA</span>
                 <span className="metric-box-alert font-mono">{aiAnalysis.alerta}</span>
                 <p className="metric-box-sub">{aiAnalysis.resumenTactico}</p>
+              </div>
+
+              {/* Información del Dataset Táctico de 1,200 registros históricos para alimentar el razonamiento */}
+              <div className="ai-metric-box full-width" style={{ backgroundColor: 'var(--bg-app)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-card)', padding: '10px 12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="metric-box-label" style={{ color: 'var(--color-primary)', fontWeight: 800 }}>
+                    🧠 RAZONAMIENTO BASADO EN DATASET HISTÓRICO (1,200 SINIESTROS SCZ)
+                  </span>
+                  <span style={{ fontSize: '10px', color: 'var(--text-muted)' }} className="font-tactical-mono">k-NN &bull; DBSCAN</span>
+                </div>
+                <div style={{ marginTop: '6px', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <p style={{ margin: 0, color: 'var(--text-primary)' }}>
+                    💧 <b>Agua estimada recomendada:</b> {aiInferenceEngine.estimarRecursos(aiAnalysis.categoria, aiAnalysis.severidad).litrosAguaSugeridos.toLocaleString()} Litros
+                  </p>
+                  <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '11px' }}>
+                    📌 Casos similares en Santa Cruz:
+                  </p>
+                  {aiInferenceEngine.buscarCasosSimilares(textoReporte, 2).map((caso) => (
+                    <div key={caso.id} style={{ background: '#FFFFFF', border: '1px solid var(--border-color)', padding: '6px 10px', borderRadius: 'var(--radius-btn)', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                      <b style={{ color: 'var(--color-primary)' }}>[{caso.id}]</b> {caso.distritoMunicipal} ({caso.nombreZona}) - {caso.recursosRequeridos.litrosAguaMinimos}L &bull; {caso.recomendacionTacticaIA.substring(0, 75)}...
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>

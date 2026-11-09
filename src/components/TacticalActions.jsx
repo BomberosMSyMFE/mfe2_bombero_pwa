@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { getFlotasApiBase } from '../services/flotasApi';
 
 export default function TacticalActions({ camionId = 'B-04', isOnline, onActionRecorded }) {
   const [currentStatus, setCurrentStatus] = useState('EN_SERVICIO');
@@ -43,8 +44,8 @@ export default function TacticalActions({ camionId = 'B-04', isOnline, onActionR
 
     if (isOnline) {
       try {
-        // Enviar telemetría al endpoint oficial de Spring Boot (CU-05) -> Modifica la tabla 'unidades_flota' en PostgreSQL
-        const resp = await fetch('http://localhost:8080/api/v1/flotas/telemetria', {
+        const baseUrl = getFlotasApiBase();
+        const resp = await fetch(`${baseUrl}/telemetria`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

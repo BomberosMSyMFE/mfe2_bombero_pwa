@@ -8,6 +8,7 @@ export default function CabinHeader({
   camionId = 'B-04',
   matricula = 'SGT-7721',
   onCambiarPerfil = null,
+  onInstallApp = null,
 }) {
   const [currentTime, setCurrentTime] = useState('');
 
@@ -44,7 +45,7 @@ export default function CabinHeader({
           <div className="brand-text">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h1 className="brand-title">TERMINAL DE CABINA - UNIDAD {camionId}</h1>
-              <span className="badge-status" style={{ fontSize: '10px' }}>PERFIL ACTIVO</span>
+              <span className="badge-fire badge-fire-critical" style={{ fontSize: '10px' }}>PERFIL ACTIVO</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
               <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
@@ -58,9 +59,9 @@ export default function CabinHeader({
                     if (sel) onCambiarPerfil(sel);
                   }}
                   style={{
-                    backgroundColor: 'rgba(0,0,0,0.4)',
-                    color: '#93C5FD',
-                    border: '1px solid var(--border-subtle)',
+                    backgroundColor: 'var(--bg-app)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-color)',
                     borderRadius: '4px',
                     fontSize: '11px',
                     padding: '2px 6px',
@@ -123,6 +124,27 @@ export default function CabinHeader({
         >
           {isSimulatingOffline ? '📶 RESTAURAR SEÑAL' : '⚠️ SIMULAR PÉRDIDA DE SEÑAL'}
         </button>
+
+        {/* Botón Instalar App PWA */}
+        {onInstallApp && (
+          <button
+            className="btn-tactical"
+            onClick={onInstallApp}
+            style={{
+              backgroundColor: 'rgba(56, 189, 248, 0.1)',
+              color: '#38BDF8',
+              border: '1px solid #38BDF8',
+              cursor: 'pointer',
+              fontWeight: '700',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+            title="Instalar esta aplicación PWA en el dispositivo (PC o Móvil)"
+          >
+            📲 INSTALAR APP
+          </button>
+        )}
       </div>
     </header>
   );
